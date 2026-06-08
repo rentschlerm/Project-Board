@@ -561,32 +561,114 @@ let sortByPriority = true;
 /* ═══════════════════════════════════════════════════════
    API  (all via GET to avoid CORS pre-flight)
 ═══════════════════════════════════════════════════════ */
-async function api(params) {
+const CACHE_KEY = 'kanban_tasks_cache';
+
+async function api(params, timeoutMs = 30000) {
   const u = new URL(SCRIPT_URL);
   Object.entries(params).forEach(([k,v]) => u.searchParams.set(k, String(v)));
-  const r = await fetch(u.toString());
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const json = await r.json();
-  if (json.error) throw new Error(json.error);
-  return json;
-}
 
-async function loadTasks() {
-  setSubtitle('<span class="spinner"></span> &nbsp;Syncing…');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    const d = await api({ action:'get' });
-    tasks = d.tasks || [];
-    renderBoard();
-    updateProgress();
-    setSubtitle(tasks.length + ' tasks · synced ' + new Date().toLocaleTimeString());
+    const r = await fetch(u.toString(), {
+      redirect: 'follow',
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const json = await r.json();
+    if (json.error) throw new Error(json.error);
+    return json;
   } catch(e) {
-    showToast('Load failed: ' + e.message, true);
-    setSubtitle('⚠ Connection error');
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('timeout');
+    throw e;
   }
 }
 
+async function loadTasks() {
+  // ── 1. Load from cache instantly so the board is usable right away ──
+  const cached = localStorage.getItem(CACHE_KEY);
+  if (cached) {
+    try {
+      tasks = JSON.parse(cached);
+      renderBoard();
+      updateProgress();
+    } catch(_) {}
+  }
+
+  // ── 2. Fetch fresh data in background ──
+  let attempt = 0;
+  const MAX = 2;
+
+  async function tryFetch() {
+    attempt++;
+    const isRetry = attempt > 1;
+
+    if (cached && !isRetry) {
+      setSubtitle(tasks.length + ' tasks · refreshing in background…');
+    } else {
+      setSubtitle('<span class="spinner"></span> &nbsp;' +
+        (isRetry ? 'Retrying…' : 'Connecting to Google Sheets…'));
+      if (!cached) showLoadingBoard();
+    }
+
+    try {
+      const d = await api({ action:'get' });
+      tasks = d.tasks || [];
+      localStorage.setItem(CACHE_KEY, JSON.stringify(tasks));
+      renderBoard();
+      updateProgress();
+      setSubtitle(tasks.length + ' tasks · synced ' + new Date().toLocaleTimeString());
+    } catch(e) {
+      const isTimeout = e.message === 'timeout';
+      if (attempt < MAX) {
+        // Auto-retry once
+        setSubtitle('<span class="spinner"></span> &nbsp;Script waking up, retrying…');
+        setTimeout(tryFetch, 3000);
+        return;
+      }
+      // Final failure
+      if (cached) {
+        setSubtitle('⚠ Offline · showing cached data · <a href="#" onclick="loadTasks();return false" style="color:var(--todo)">retry</a>');
+      } else {
+        const msg = isTimeout
+          ? 'Apps Script is taking too long to respond.'
+          : 'Could not connect to Google Sheets.';
+        showErrorBoard(msg);
+        setSubtitle('⚠ Connection error');
+      }
+    }
+  }
+
+  tryFetch();
+}
+
+function showLoadingBoard() {
+  document.getElementById('board').innerHTML = `
+    <div class="center-msg">
+      <div><span class="spinner"></span> &nbsp;Loading board…</div>
+      <p style="margin-top:14px;font-size:12px;color:var(--muted);max-width:300px">
+        Google Apps Script may take up to 30 seconds to wake up on first load.
+      </p>
+    </div>`;
+}
+
+function showErrorBoard(msg) {
+  document.getElementById('board').innerHTML = `
+    <div class="center-msg">
+      <div class="icon">⚠</div>
+      <h3>Connection failed</h3>
+      <p>${msg}</p>
+      <button class="btn primary" onclick="loadTasks()" style="margin-top:4px">↻ Try Again</button>
+    </div>`;
+}
+
+
 async function apiMoveTask(id, col) {
   tasks = tasks.map(t => t.id===id ? {...t, col} : t);
+  localStorage.setItem(CACHE_KEY, JSON.stringify(tasks));
   renderBoard(); updateProgress();
   try { await api({ action:'update', id, col }); }
   catch(e) { showToast('Sync error: ' + e.message, true); }
@@ -594,6 +676,7 @@ async function apiMoveTask(id, col) {
 
 async function apiDeleteTask(id) {
   tasks = tasks.filter(t => t.id !== id);
+  localStorage.setItem(CACHE_KEY, JSON.stringify(tasks));
   renderBoard(); updateProgress();
   try {
     await api({ action:'delete', id });
@@ -613,6 +696,7 @@ async function apiAddTask(title, desc, cat, pri, col) {
   try {
     const d = await api({ action:'add', title, desc, cat, pri, col });
     tasks.push({ id:d.id, title, desc, cat, pri, col, notes:'' });
+    localStorage.setItem(CACHE_KEY, JSON.stringify(tasks));
     renderBoard(); updateProgress();
     showToast('Task added ✓');
   } catch(e) {
@@ -779,6 +863,8 @@ function toggleSort() {
 }
 
 
+/* ═══════════════════════════════════════════════════════
+   ADD TASK MODAL
 ═══════════════════════════════════════════════════════ */
 function openAddModal(col='todo') {
   document.getElementById('f-title').value = '';
