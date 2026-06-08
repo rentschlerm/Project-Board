@@ -115,6 +115,18 @@
     .btn.danger:hover { background: rgba(248,113,113,0.1); }
     .btn.sm     { font-size: 11px; padding: 3px 8px; }
     .btn:disabled { opacity: 0.25; cursor: not-allowed; pointer-events: none; }
+    .btn.active   { background: rgba(248,113,113,0.15); border-color: rgba(248,113,113,0.45); color: #f87171; }
+    .btn.active:hover { background: rgba(248,113,113,0.22); }
+    .pri-badge {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #f87171;
+      margin-right: 3px;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
 
     /* ─── Board ───────────────────────────────── */
     .board {
@@ -441,8 +453,11 @@
         <span class="pct" id="prog-pct">0%</span>
       </div>
       <button class="btn ghost" onclick="loadTasks()" title="Refresh from Google Sheets">↻</button>
+      <button class="btn active" id="sort-btn" onclick="toggleSort()" title="Toggle priority sort">
+        <span class="pri-badge"></span> High first
+      </button>
       <button class="btn primary"  onclick="openAddModal('todo')">+ Add Task</button>
-      <button class="btn ghost"    onclick="openConfig()" title="Settings">⚙</button>
+
     </div>
   </div>
 
@@ -462,24 +477,7 @@
   </div>
 </div>
 
-<!-- ─── Settings Modal ───────────────────────────────── -->
-<div class="overlay" id="cfg-overlay" style="display:none" onclick="if(event.target===this)closeConfig()">
-  <div class="modal">
-    <h2>⚙ Board Settings</h2>
-    <p class="info">
-      Paste your Google Apps Script Web App URL below.<br>
-      <a href="README.md" target="_blank">View setup guide →</a>
-    </p>
-    <div class="form-group">
-      <label>Apps Script Web App URL</label>
-      <input type="url" id="cfg-url" placeholder="https://script.google.com/macros/s/…/exec" />
-    </div>
-    <div class="modal-actions">
-      <button class="btn primary" onclick="saveConfig()">Save &amp; Connect</button>
-      <button class="btn ghost"   onclick="closeConfig()">Cancel</button>
-    </div>
-  </div>
-</div>
+
 
 <!-- ─── Add / Edit Task Modal ─────────────────────────── -->
 <div class="overlay" id="task-overlay" style="display:none" onclick="if(event.target===this)closeTaskModal()">
@@ -536,8 +534,7 @@
 /* ═══════════════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════════════ */
-const URL_KEY = 'kanban_script_url';
-let SCRIPT_URL = localStorage.getItem(URL_KEY) || '';
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyoJLPfHrJPKk-q46CHtVZKTT80fqQMiE-fy2vomUemiHk-0iug4nGvOg7n16jnZOvWcA/exec';
 let tasks = [];
 let expanded = new Set();
 let pendingDelete = {};   // id → timeout
@@ -558,12 +555,13 @@ const CAT_STYLE = {
   Development: { text:'#34d399', bg:'rgba(52,211,153,0.13)'  },
 };
 const PRI_COLOR = { high:'#f87171', medium:'#fbbf24', low:'#86efac' };
+const PRI_ORDER = { high: 0, medium: 1, low: 2 };
+let sortByPriority = true;
 
 /* ═══════════════════════════════════════════════════════
    API  (all via GET to avoid CORS pre-flight)
 ═══════════════════════════════════════════════════════ */
 async function api(params) {
-  if (!SCRIPT_URL) { openConfig(); throw new Error('not-configured'); }
   const u = new URL(SCRIPT_URL);
   Object.entries(params).forEach(([k,v]) => u.searchParams.set(k, String(v)));
   const r = await fetch(u.toString());
@@ -582,15 +580,8 @@ async function loadTasks() {
     updateProgress();
     setSubtitle(tasks.length + ' tasks · synced ' + new Date().toLocaleTimeString());
   } catch(e) {
-    if (e.message === 'not-configured') {
-      showEmpty('🔌', 'Connect your Google Sheet',
-        'Click ⚙ settings to paste your Apps Script URL and load your tasks.',
-        '<button class="btn primary" onclick="openConfig()">Configure Board</button>');
-      setSubtitle('Not connected');
-    } else {
-      showToast('Load failed: ' + e.message, true);
-      setSubtitle('⚠ Connection error');
-    }
+    showToast('Load failed: ' + e.message, true);
+    setSubtitle('⚠ Connection error');
   }
 }
 
@@ -638,7 +629,10 @@ function renderBoard() {
 }
 
 function renderColumn(col, ci) {
-  const ct = tasks.filter(t => t.col === col.id);
+  let ct = tasks.filter(t => t.col === col.id);
+  if (sortByPriority) {
+    ct = [...ct].sort((a, b) => (PRI_ORDER[a.pri] ?? 1) - (PRI_ORDER[b.pri] ?? 1));
+  }
   const c  = col.color;
   return `
   <div class="column" id="col-${col.id}"
@@ -769,25 +763,22 @@ function updateProgress() {
 }
 
 /* ═══════════════════════════════════════════════════════
-   CONFIG MODAL
+   SORT TOGGLE
 ═══════════════════════════════════════════════════════ */
-function openConfig() {
-  document.getElementById('cfg-url').value = SCRIPT_URL;
-  document.getElementById('cfg-overlay').style.display = 'flex';
-  setTimeout(()=>document.getElementById('cfg-url').focus(),50);
-}
-function closeConfig() { document.getElementById('cfg-overlay').style.display='none'; }
-function saveConfig() {
-  const u = document.getElementById('cfg-url').value.trim();
-  if (!u) { showToast('Please enter a URL', true); return; }
-  SCRIPT_URL = u;
-  localStorage.setItem(URL_KEY, u);
-  closeConfig();
-  loadTasks();
+function toggleSort() {
+  sortByPriority = !sortByPriority;
+  const btn = document.getElementById('sort-btn');
+  if (sortByPriority) {
+    btn.className = 'btn active';
+    btn.innerHTML = '<span class="pri-badge"></span> High first';
+  } else {
+    btn.className = 'btn ghost';
+    btn.innerHTML = '<span class="pri-badge" style="background:var(--muted)"></span> Default order';
+  }
+  renderBoard();
 }
 
-/* ═══════════════════════════════════════════════════════
-   ADD TASK MODAL
+
 ═══════════════════════════════════════════════════════ */
 function openAddModal(col='todo') {
   document.getElementById('f-title').value = '';
@@ -848,15 +839,13 @@ function showToast(msg, err=false) {
 /* keyboard shortcuts */
 document.addEventListener('keydown', e => {
   if (e.target.matches('input,textarea,select')) return;
-  if (e.key==='Escape') { closeConfig(); closeTaskModal(); }
+  if (e.key==='Escape') { closeTaskModal(); }
   if (e.key.toLowerCase()==='n') openAddModal('todo');
   if (e.key.toLowerCase()==='r') loadTasks();
 });
 document.getElementById('f-title').addEventListener('keydown', e => { if(e.key==='Enter') submitTask(); });
-document.getElementById('cfg-url').addEventListener('keydown', e => { if(e.key==='Enter') saveConfig(); });
-
 /* ─── INIT ─── */
-SCRIPT_URL ? loadTasks() : openConfig();
+loadTasks();
 </script>
 </body>
 </html>
